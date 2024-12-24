@@ -1,7 +1,9 @@
 package scientist
 
 import (
+	"context"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -33,6 +35,12 @@ type Result struct {
 	Errors       []ResultError
 }
 
+type observationResult struct {
+	name string
+	obs  *Observation
+	err  error
+}
+
 func (r Result) IsMatched() bool {
 	if r.IsMismatched() || r.IsIgnored() {
 		return false
@@ -54,45 +62,91 @@ func Run(e *Experiment, name string) Result {
 		r.Errors = append(r.Errors, e.resultErr("before_run", err))
 	}
 
-	numCandidates := len(e.behaviors) - 1
-	r.Control = observe(e, name, e.behaviors[name])
-	r.Candidates = make([]*Observation, numCandidates)
-	r.Ignored = make([]*Observation, 0, numCandidates)
-	r.Mismatched = make([]*Observation, 0, numCandidates)
-	r.Observations = make([]*Observation, numCandidates+1)
-	r.Observations[0] = r.Control
+	numBehaviors := len(e.behaviors)
 
-	i := 0
-	for bname, b := range e.behaviors {
-		if bname == name {
-			continue
+	r.Candidates = make([]*Observation, numBehaviors-1)
+	r.Ignored = make([]*Observation, 0, numBehaviors-1)
+	r.Mismatched = make([]*Observation, 0, numBehaviors-1)
+	r.Observations = make([]*Observation, numBehaviors)
+
+	if !e.runConcurrently {
+		r.Control = observe(e, name, e.behaviors[name])
+		r.Observations[0] = r.Control
+
+		i := 0
+		for bname, b := range e.behaviors {
+			if bname == name {
+				continue
+			}
+			c := observe(e, bname, b)
+			r.Candidates[i] = c
+			i += 1
+			r.Observations[i] = c
+			processObservation(e, &r, r.Control, c)
+		}
+	} else {
+		resultChan := make(chan observationResult, numBehaviors)
+		var wg sync.WaitGroup
+
+		for bname, b := range e.behaviors {
+			wg.Add(1)
+			go func(behaviorName string, behavior behaviorFunc) {
+				defer wg.Done()
+
+				var ctx context.Context
+				var cancel context.CancelFunc
+
+				ctx, cancel = createContext(e)
+				defer cancel()
+
+				doneChan := make(chan *Observation, 1)
+				go func() {
+					obs := observe(e, behaviorName, behavior)
+					doneChan <- obs
+				}()
+
+				select {
+				case obs := <-doneChan:
+					resultChan <- observationResult{behaviorName, obs, nil}
+				case <-ctx.Done():
+					timeoutErr := ctx.Err()
+					resultChan <- observationResult{
+						name: behaviorName,
+						obs: &Observation{
+							Name: behaviorName,
+						},
+						err: timeoutErr,
+					}
+				}
+			}(bname, b)
 		}
 
-		c := observe(e, bname, b)
-		r.Candidates[i] = c
-		i += 1
-		r.Observations[i] = c
+		go func() {
+			wg.Wait()
+			close(resultChan)
+		}()
 
-		ok, err := matching(e, r.Control, c)
-		if err != nil {
-			ok = false
-			r.Errors = append(r.Errors, e.resultErr("compare", err))
+		i := 0
+		for res := range resultChan {
+			if res.err != nil {
+				r.Errors = append(r.Errors, e.resultErr("timeout", res.err))
+			}
+
+			if res.name == name {
+				r.Control = res.obs
+				r.Observations[0] = res.obs
+				continue
+			}
+
+			r.Candidates[i] = res.obs
+			r.Observations[i+1] = res.obs
+			i++
 		}
 
-		if ok {
-			continue
-		}
-
-		ignored, err := ignoring(e, r.Control, c)
-		if err != nil {
-			ignored = false
-			r.Errors = append(r.Errors, e.resultErr("ignore", err))
-		}
-
-		if ignored {
-			r.Ignored = append(r.Ignored, c)
-		} else {
-			r.Mismatched = append(r.Mismatched, c)
+		for _, candidate := range r.Candidates {
+			if candidate != nil {
+				processObservation(e, &r, r.Control, candidate)
+			}
 		}
 	}
 
@@ -105,6 +159,42 @@ func Run(e *Experiment, name string) Result {
 	}
 
 	return r
+}
+
+func createContext(e *Experiment) (context.Context, context.CancelFunc) {
+	var ctx context.Context
+	var cancel context.CancelFunc
+
+	if e.timeout != nil {
+		ctx, cancel = context.WithTimeout(context.Background(), *e.timeout)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+	return ctx, cancel
+}
+
+func processObservation(e *Experiment, r *Result, control *Observation, candidate *Observation) {
+	ok, err := matching(e, control, candidate)
+	if err != nil {
+		ok = false
+		r.Errors = append(r.Errors, e.resultErr("compare", err))
+	}
+
+	if ok {
+		return
+	}
+
+	ignored, err := ignoring(e, control, candidate)
+	if err != nil {
+		ignored = false
+		r.Errors = append(r.Errors, e.resultErr("ignore", err))
+	}
+
+	if ignored {
+		r.Ignored = append(r.Ignored, candidate)
+	} else {
+		r.Mismatched = append(r.Mismatched, candidate)
+	}
 }
 
 func matching(e *Experiment, control, candidate *Observation) (bool, error) {

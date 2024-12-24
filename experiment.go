@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"time"
 )
 
 var ErrorOnMismatches bool
@@ -13,6 +14,8 @@ func New(name string) *Experiment {
 		Name:              name,
 		Context:           make(map[string]string),
 		ErrorOnMismatches: ErrorOnMismatches,
+		runConcurrently:   false,
+		timeout:           nil,
 		behaviors:         make(map[string]behaviorFunc),
 		comparator:        defaultComparator,
 		runcheck:          defaultRunCheck,
@@ -29,6 +32,8 @@ type Experiment struct {
 	Name              string
 	Context           map[string]string
 	ErrorOnMismatches bool
+	runConcurrently   bool
+	timeout           *time.Duration
 	behaviors         map[string]behaviorFunc
 	ignores           []func(control, candidate interface{}) (bool, error)
 	comparator        func(control, candidate interface{}) (bool, error)
@@ -77,6 +82,11 @@ func (e *Experiment) Publish(fn func(Result) error) {
 
 func (e *Experiment) ReportErrors(fn func(...ResultError)) {
 	e.errorReporter = fn
+}
+
+func (e *Experiment) EnableConcurrency(timeout *time.Duration) {
+	e.runConcurrently = true
+	e.timeout = timeout
 }
 
 func (e *Experiment) Run() (interface{}, error) {

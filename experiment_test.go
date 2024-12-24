@@ -4,7 +4,24 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
+
+func longRunningExperiment() *Experiment {
+	e := New("long-running")
+
+	e.Use(func() (interface{}, error) {
+		time.Sleep(200 * time.Millisecond)
+		return 1, nil
+	})
+
+	e.Try(func() (interface{}, error) {
+		time.Sleep(800 * time.Millisecond)
+		return 1, nil
+	})
+
+	return e
+}
 
 func TestExperimentMatch(t *testing.T) {
 	e := New("match")
@@ -391,5 +408,60 @@ func TestExperimentSkipCompareSameErrors(t *testing.T) {
 
 	if !published {
 		t.Errorf("results never published")
+	}
+}
+
+func TestSequentialExecution(t *testing.T) {
+	e := longRunningExperiment()
+	startTime := time.Now()
+
+	_, err := e.Run()
+	duration := time.Since(startTime)
+
+	if err != nil {
+		t.Errorf("Unexpected control error: %v", err)
+	}
+
+	if duration < time.Second {
+		t.Errorf("Expected experiment to take at least 1 second, took %s", duration)
+	}
+}
+
+func TestConcurrentExecution(t *testing.T) {
+	e := longRunningExperiment()
+	startTime := time.Now()
+	e.EnableConcurrency(nil)
+
+	_, err := e.Run()
+	duration := time.Since(startTime)
+
+	if err != nil {
+		t.Errorf("Unexpected control error: %v", err)
+	}
+
+	if duration < 800*time.Millisecond || duration > 810*time.Millisecond {
+		t.Errorf("Expected experiment to take 800ms, took %s", duration)
+	}
+}
+
+func TestConcurrentExecutionWithTimeout(t *testing.T) {
+	e := longRunningExperiment()
+	timeout := time.Duration(500) * time.Millisecond
+	e.EnableConcurrency(&timeout)
+
+	_, err := e.Run()
+
+	e.Publish(func(r Result) error {
+		if r.Errors == nil || len(r.Errors) == 0 {
+			t.Errorf("Expected timeout error")
+		}
+		if r.Errors[0].Operation != "timeout" {
+			t.Errorf("Expected timeout error")
+		}
+		return nil
+	})
+
+	if err != nil {
+		t.Errorf("Unexpected control error: %v", err)
 	}
 }
