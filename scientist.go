@@ -121,10 +121,8 @@ func Run(e *Experiment, name string) Result {
 			}(bname, b)
 		}
 
-		go func() {
-			wg.Wait()
-			close(resultChan)
-		}()
+		wg.Wait()
+		close(resultChan)
 
 		i := 0
 		for res := range resultChan {
