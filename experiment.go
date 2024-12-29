@@ -1,9 +1,11 @@
 package scientist
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"reflect"
+	"time"
 )
 
 var ErrorOnMismatches bool
@@ -13,6 +15,8 @@ func New(name string) *Experiment {
 		Name:              name,
 		Context:           make(map[string]string),
 		ErrorOnMismatches: ErrorOnMismatches,
+		runConcurrently:   false,
+		timeout:           nil,
 		behaviors:         make(map[string]behaviorFunc),
 		comparator:        defaultComparator,
 		runcheck:          defaultRunCheck,
@@ -29,6 +33,8 @@ type Experiment struct {
 	Name              string
 	Context           map[string]string
 	ErrorOnMismatches bool
+	runConcurrently   bool
+	timeout           *time.Duration
 	behaviors         map[string]behaviorFunc
 	ignores           []func(control, candidate interface{}) (bool, error)
 	comparator        func(control, candidate interface{}) (bool, error)
@@ -79,11 +85,16 @@ func (e *Experiment) ReportErrors(fn func(...ResultError)) {
 	e.errorReporter = fn
 }
 
-func (e *Experiment) Run() (interface{}, error) {
-	return e.RunBehavior(controlBehavior)
+func (e *Experiment) EnableConcurrency(timeout *time.Duration) {
+	e.runConcurrently = true
+	e.timeout = timeout
 }
 
-func (e *Experiment) RunBehavior(name string) (interface{}, error) {
+func (e *Experiment) Run(ctx context.Context) (interface{}, error) {
+	return e.RunBehavior(ctx, controlBehavior)
+}
+
+func (e *Experiment) RunBehavior(ctx context.Context, name string) (interface{}, error) {
 	enabled, err := e.runcheck()
 	if err != nil {
 		enabled = true
@@ -92,7 +103,7 @@ func (e *Experiment) RunBehavior(name string) (interface{}, error) {
 	}
 
 	if enabled && len(e.behaviors) > 1 {
-		r := Run(e, name)
+		r := Run(ctx, e, name)
 
 		if r.Control.Err == nil && e.ErrorOnMismatches && r.IsMismatched() {
 			return nil, MismatchError{r}
