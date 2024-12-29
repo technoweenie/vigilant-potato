@@ -56,7 +56,7 @@ func (r Result) IsIgnored() bool {
 	return len(r.Ignored) > 0
 }
 
-func Run(e *Experiment, name string) Result {
+func Run(ctx context.Context, e *Experiment, name string) Result {
 	r := Result{Experiment: e}
 	if err := e.beforeRun(); err != nil {
 		r.Errors = append(r.Errors, e.resultErr("before_run", err))
@@ -70,82 +70,9 @@ func Run(e *Experiment, name string) Result {
 	r.Observations = make([]*Observation, numBehaviors)
 
 	if !e.runConcurrently {
-		r.Control = observe(e, name, e.behaviors[name])
-		r.Observations[0] = r.Control
-
-		i := 0
-		for bname, b := range e.behaviors {
-			if bname == name {
-				continue
-			}
-			c := observe(e, bname, b)
-			r.Candidates[i] = c
-			i += 1
-			r.Observations[i] = c
-			processObservation(e, &r, r.Control, c)
-		}
+		runSequentially(&r, e, name)
 	} else {
-		resultChan := make(chan observationResult, numBehaviors)
-		var wg sync.WaitGroup
-
-		for bname, b := range e.behaviors {
-			wg.Add(1)
-			go func(behaviorName string, behavior behaviorFunc) {
-				defer wg.Done()
-
-				var ctx context.Context
-				var cancel context.CancelFunc
-
-				ctx, cancel = createContext(e)
-				defer cancel()
-
-				doneChan := make(chan *Observation, 1)
-				go func() {
-					obs := observe(e, behaviorName, behavior)
-					doneChan <- obs
-				}()
-
-				select {
-				case obs := <-doneChan:
-					resultChan <- observationResult{behaviorName, obs, nil}
-				case <-ctx.Done():
-					timeoutErr := ctx.Err()
-					resultChan <- observationResult{
-						name: behaviorName,
-						obs: &Observation{
-							Name: behaviorName,
-						},
-						err: timeoutErr,
-					}
-				}
-			}(bname, b)
-		}
-
-		wg.Wait()
-		close(resultChan)
-
-		i := 0
-		for res := range resultChan {
-			if res.err != nil {
-				r.Errors = append(r.Errors, e.resultErr("timeout", res.err))
-			}
-
-			if res.name == name {
-				r.Control = res.obs
-				r.Observations[0] = res.obs
-				continue
-			}
-
-			r.Candidates[i] = res.obs
-			r.Observations[i+1] = res.obs
-			i++
-		}
-
-		for _, candidate := range r.Candidates {
-			if candidate != nil {
-				processObservation(e, &r, r.Control, candidate)
-			}
-		}
+		runConcurrently(ctx, &r, e, name, numBehaviors)
 	}
 
 	if err := e.publisher(r); err != nil {
@@ -159,14 +86,92 @@ func Run(e *Experiment, name string) Result {
 	return r
 }
 
-func createContext(e *Experiment) (context.Context, context.CancelFunc) {
-	var ctx context.Context
+func runSequentially(r *Result, e *Experiment, name string) {
+	r.Control = observe(e, name, e.behaviors[name])
+	r.Observations[0] = r.Control
+
+	i := 0
+	for bname, b := range e.behaviors {
+		if bname == name {
+			continue
+		}
+		c := observe(e, bname, b)
+		r.Candidates[i] = c
+		i += 1
+		r.Observations[i] = c
+		processObservation(e, r, r.Control, c)
+	}
+}
+
+func runConcurrently(ctx context.Context, r *Result, e *Experiment, name string, numBehaviors int) {
+	resultChan := make(chan observationResult, numBehaviors)
+	var wg sync.WaitGroup
+
+	wg.Add(len(e.behaviors))
+	for bname, b := range e.behaviors {
+		go func(behaviorName string, behavior behaviorFunc) {
+			defer wg.Done()
+
+			subCtx, cancel := createContext(ctx, e)
+			defer cancel()
+
+			doneChan := make(chan *Observation, 1)
+			go func() {
+				obs := observe(e, behaviorName, behavior)
+
+				doneChan <- obs
+			}()
+
+			select {
+			case obs := <-doneChan:
+				resultChan <- observationResult{behaviorName, obs, nil}
+			case <-subCtx.Done():
+				timeoutErr := subCtx.Err()
+				resultChan <- observationResult{
+					name: behaviorName,
+					obs: &Observation{
+						Name: behaviorName,
+					},
+					err: timeoutErr,
+				}
+			}
+		}(bname, b)
+	}
+
+	wg.Wait()
+	close(resultChan)
+
+	i := 0
+	for res := range resultChan {
+		if res.err != nil {
+			r.Errors = append(r.Errors, e.resultErr("timeout", res.err))
+		}
+
+		if res.name == name {
+			r.Control = res.obs
+			r.Observations[0] = res.obs
+			continue
+		}
+
+		r.Candidates[i] = res.obs
+		r.Observations[i+1] = res.obs
+		i++
+	}
+
+	for _, candidate := range r.Candidates {
+		if candidate != nil {
+			processObservation(e, r, r.Control, candidate)
+		}
+	}
+}
+
+func createContext(ctx context.Context, e *Experiment) (context.Context, context.CancelFunc) {
 	var cancel context.CancelFunc
 
 	if e.timeout != nil {
-		ctx, cancel = context.WithTimeout(context.Background(), *e.timeout)
+		ctx, cancel = context.WithTimeout(ctx, *e.timeout)
 	} else {
-		ctx, cancel = context.WithCancel(context.Background())
+		ctx, cancel = context.WithCancel(ctx)
 	}
 	return ctx, cancel
 }

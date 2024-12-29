@@ -1,6 +1,7 @@
 package scientist
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"reflect"
@@ -89,11 +90,11 @@ func (e *Experiment) EnableConcurrency(timeout *time.Duration) {
 	e.timeout = timeout
 }
 
-func (e *Experiment) Run() (interface{}, error) {
-	return e.RunBehavior(controlBehavior)
+func (e *Experiment) Run(ctx context.Context) (interface{}, error) {
+	return e.RunBehavior(ctx, controlBehavior)
 }
 
-func (e *Experiment) RunBehavior(name string) (interface{}, error) {
+func (e *Experiment) RunBehavior(ctx context.Context, name string) (interface{}, error) {
 	enabled, err := e.runcheck()
 	if err != nil {
 		enabled = true
@@ -102,7 +103,7 @@ func (e *Experiment) RunBehavior(name string) (interface{}, error) {
 	}
 
 	if enabled && len(e.behaviors) > 1 {
-		r := Run(e, name)
+		r := Run(ctx, e, name)
 
 		if r.Control.Err == nil && e.ErrorOnMismatches && r.IsMismatched() {
 			return nil, MismatchError{r}
